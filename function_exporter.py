@@ -30,6 +30,7 @@ def is_identified(function_name):
         and not function_name.startswith("entry") \
         and not function_name.startswith("~cls_0") \
         and not function_name.startswith("ctor") \
+        and not function_name.startswith("switchD") \
         and not function_name.startswith("lpLocaleEnumProc") \
         and not function_name.startswith("dtor_0x")
 

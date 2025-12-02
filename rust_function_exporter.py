@@ -80,6 +80,10 @@ def map_type_to_rust(ghidra_type):
     """Map Ghidra types to Rust types"""
     type_str = str(ghidra_type).lower()
     
+    # Handle void type explicitly - check the actual type name
+    if ghidra_type.getName() == "void":
+        return "()"
+    
     # Basic type mappings
     type_map = {
         "void": "()",
@@ -136,8 +140,11 @@ def get_function_signature_rust(function):
         # First parameter is implicit 'this', but we still include it in Rust
         pass
     
-    # Map return type
-    if str(return_type) == "undefined":
+    ## # Map return type
+    ## if str(return_type) == "undefined":
+    # Map return type - be more explicit about void detection
+    return_type_name = return_type.getName()
+    if return_type_name == "void":
         rust_return = "()"
     else:
         rust_return = map_type_to_rust(return_type)
