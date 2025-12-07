@@ -59,6 +59,7 @@ entity_names = [
     "ZTAnimal",
     "ZTGuest",
     "ZTScenery",
+    "ZTStaff",
     "ZTKeeper",
     "ZTMaint",
     "ZTGuide",
@@ -81,6 +82,7 @@ entity_type_names = [
     "ZTAnimalType",
     "ZTGuestType",
     "ZTSceneryType",
+    "ZTStaffType",
     "ZTKeeperType",
     "ZTMaintType",
     "ZTGuideType",
@@ -109,8 +111,14 @@ if __name__ == "__main__":
         if len(parts) > 1 and parts[0] in class_names and (parts[1].startswith("vftable") or parts[1].startswith("vtable")) and type(datatype) is StructureDB:
             # print(datatype.getName()) 
             f = datatype.getComponentAt(addr.getOffset())
+            if f is None:
+                print("No datatype: " + parts[0])
+                continue
             if f.getDataType() is None or type(f.getDataType()) is not PointerDB:
-                print("No pointer: " + str(type(f.getDataType())))
+                print("No pointer: " + str(type(f.getDataType())) + " " + parts[0]) 
+                continue
+            if f.getDataType().getDataType() is None:
+                print("Void ptr?: " + parts[0])
                 continue
             function_address = f.getDataType().getDataType().getName().split("_")[-1]
             print(parts[0] + " " + function_address + " " + get_function(ctx, function_address).getName())
