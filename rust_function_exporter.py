@@ -59,11 +59,61 @@ def get_class_name(function):
     
     return parent_symbol_name
 
+def load_mutability_config(config_file="mutability.cfg"):
+    """
+    Load mutability configuration from a file.
+
+    File format (one function per line):
+        # Comments start with #
+        ClassName::FunctionName 0 2 3  # params at indices 0, 2, 3 are mutable
+        standalone::FunctionName 1     # param at index 1 is mutable
+
+    Returns a dict mapping "ClassName::FunctionName" -> set of mutable param indices
+    """
+    mutability_map = {}
+
+    try:
+        with open(config_file, 'r') as f:
+            for line_num, line in enumerate(f, 1):
+                # Strip whitespace and skip comments/empty lines
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+
+                # Split line into parts
+                parts = line.split()
+                if len(parts) < 1:
+                    continue
+
+                function_name = parts[0]
+
+                # Parse parameter indices (rest of the line)
+                mutable_indices = set()
+                for part in parts[1:]:
+                    # Skip inline comments
+                    if part.startswith("#"):
+                        break
+                    try:
+                        mutable_indices.add(int(part))
+                    except ValueError:
+                        print("Warning: Invalid parameter index '{}' on line {} in {}".format(
+                            part, line_num, config_file))
+
+                mutability_map[function_name] = mutable_indices
+
+        print("Loaded mutability config for {} functions from {}".format(
+            len(mutability_map), config_file))
+    except IOError:
+        print("No mutability config file found at {}. All pointers will be *const.".format(
+            config_file))
+
+    return mutability_map
+
 def get_calling_convention(function):
     """Determine the calling convention from function signature"""
     signature = function.getSignature()
     calling_conv = signature.getCallingConventionName()
-    
+
     # Map Ghidra conventions to Rust conventions
     if calling_conv == "__thiscall":
         return "thiscall"
@@ -76,88 +126,146 @@ def get_calling_convention(function):
     else:
         return "cdecl"  # Default to cdecl if unknown
 
-def map_type_to_rust(ghidra_type):
+def map_type_to_rust(ghidra_type, is_mutable=False, _debug_fn=None):
     """Map Ghidra types to Rust types"""
-    type_str = str(ghidra_type).lower()
-    
+    if _debug_fn:
+        type_display_debug = str(ghidra_type)
+        is_ptr_debug = "*" in type_display_debug or "*" in ghidra_type.getName()
+        print("DEBUG map_type_to_rust [{}]: getName={!r}, str={!r}, class={!r}, is_pointer={!r}".format(
+            _debug_fn, ghidra_type.getName(), type_display_debug,
+            ghidra_type.getClass().getSimpleName(), is_ptr_debug
+        ))
+
     # Handle void type explicitly - check the actual type name
     if ghidra_type.getName() == "void":
         return "()"
-    
-    # Basic type mappings
-    type_map = {
-        "void": "()",
-        "bool": "bool",
-        "char": "i8",
-        "uchar": "u8",
-        "byte": "u8",
-        "ubyte": "u8",
-        "short": "i16",
-        "ushort": "u16",
-        "int": "i32",
-        "uint": "u32",
-        "long": "i32",
-        "ulong": "u32",
-        "longlong": "i64",
-        "ulonglong": "u64",
-        "float": "f32",
-        "double": "f64",
-        "undefined": "u8",
-        "undefined1": "u8",
-        "undefined2": "u16", 
-        "undefined4": "u32",
-        "undefined8": "u64"
-    }
-    
-    # Handle pointers
-    if "*" in type_str:
-        # For now, treat all pointers as u32 (32-bit addressing)
-        return "u32"
-    
-    # Check for known types
-    for ghidra, rust in type_map.items():
-        if ghidra in type_str:
+
+    # Basic type mappings as ordered list - more specific entries must come before
+    # general ones to avoid "undefined" matching "undefined4", etc.
+    type_map = [
+        ("ulonglong", "u64"),
+        ("longlong", "i64"),
+        ("undefined8", "u64"),
+        ("undefined4", "u32"),
+        ("undefined2", "u16"),
+        ("undefined1", "u8"),
+        ("undefined", "u8"),
+        ("ulong", "u32"),
+        ("uint", "u32"),
+        ("ushort", "u16"),
+        ("uchar", "u8"),
+        ("ubyte", "u8"),
+        ("bool", "bool"),
+        ("char", "i8"),
+        ("byte", "u8"),
+        ("short", "i16"),
+        ("int", "i32"),
+        ("long", "i32"),
+        ("float", "f32"),
+        ("double", "f64"),
+    ]
+
+    # Detect pointer types via string representation - more reliable than isinstance in Jython
+    type_display = str(ghidra_type)
+    is_pointer = "*" in type_display or "*" in ghidra_type.getName()
+
+    if is_pointer:
+        mutability = "mut" if is_mutable else "const"
+        # Try getDataType() for clean base type name, fall back to string stripping
+        try:
+            base_type_str = ghidra_type.getDataType().getName().lower().replace(" ", "")
+        except Exception:
+            base_type_str = type_display.lower().replace("*", "").replace(" ", "")
+
+        if base_type_str.replace("*", "").endswith("void"):
+            return "*{} c_void".format(mutability)
+
+        # Exact match first, then substring (list order ensures specificity)
+        for ghidra_key, rust in type_map:
+            if base_type_str == ghidra_key:
+                return "*{} {}".format(mutability, rust)
+        for ghidra_key, rust in type_map:
+            if ghidra_key in base_type_str:
+                return "*{} {}".format(mutability, rust)
+
+        return "*{} u32".format(mutability)
+
+    type_str = ghidra_type.getName().lower()
+
+    # Exact match first, then substring
+    for ghidra_key, rust in type_map:
+        if type_str == ghidra_key:
             return rust
-    
-    # Default to u32 for unknown types
+    for ghidra_key, rust in type_map:
+        if ghidra_key in type_str:
+            return rust
+
     return "u32"
 
-def get_function_signature_rust(function):
+def get_function_signature_rust(function, class_name=None, mutability_map=None):
     """Generate Rust function signature from Ghidra function"""
     signature = function.getSignature()
     params = signature.getArguments()
     return_type = signature.getReturnType()
     calling_conv = get_calling_convention(function)
-    
+
+    if mutability_map is None:
+        mutability_map = {}
+
+    # Determine function lookup keys for mutability config
+    fn_name = function.getName()
+    lookup_keys = [fn_name]  # Try just the function name
+    if class_name:
+        # Also try with class prefix
+        lookup_keys.insert(0, "{}::{}".format(class_name, fn_name))
+
+    # Find mutable parameter indices
+    mutable_params = set()
+    for key in lookup_keys:
+        if key in mutability_map:
+            mutable_params = mutability_map[key]
+            break
+
+    debug = fn_name if fn_name.startswith("CreateZT") else None
+
     # Map parameter types
     param_types = []
-    for param in params:
-        rust_type = map_type_to_rust(param.getDataType())
+    for i, param in enumerate(params):
+        is_mutable = i in mutable_params
+        rust_type = map_type_to_rust(param.getDataType(), is_mutable, _debug_fn=debug)
         param_types.append(rust_type)
-    
+
     # Handle 'this' parameter for thiscall
     if calling_conv == "thiscall" and len(param_types) > 0:
         # First parameter is implicit 'this', but we still include it in Rust
         pass
-    
+
     # Map return type
     return_type_name = return_type.getName()
-    if return_type_name == "void" or str(return_type) == "undefined":
+    if debug:
+        direct_rt = function.getReturnType()
+        print("DEBUG return: fn={!r}, sig getName={!r}, direct getName={!r}, direct str={!r}, direct class={!r}".format(
+            fn_name, return_type_name,
+            direct_rt.getName(), str(direct_rt), direct_rt.getClass().getSimpleName()
+        ))
+    if return_type_name in ("void", "undefined"):
         rust_return = "()"
     else:
-        rust_return = map_type_to_rust(return_type)
-    
+        rust_return = map_type_to_rust(return_type, _debug_fn=debug)
+    if debug:
+        print("DEBUG return: fn={!r} -> rust_return={!r}".format(fn_name, rust_return))
+
     # Build the function type string
     if len(param_types) == 0:
         params_str = "()"
     else:
         params_str = "(" + ", ".join(param_types) + ")"
-    
+
     if rust_return == "()":
         fn_type = "unsafe extern \"{}\" fn{}".format(calling_conv, params_str)
     else:
         fn_type = "unsafe extern \"{}\" fn{} -> {}".format(calling_conv, params_str, rust_return)
-    
+
     return fn_type
 
 def sanitize_class_name(class_name):
@@ -239,14 +347,17 @@ def sanitize_rust_name(name, class_name=""):
     return result
 
 def main():
+    # Load mutability configuration
+    mutability_map = load_mutability_config("mutability.cfg")
+
     # Get all functions
     function_manager = currentProgram.getFunctionManager()
     functions = function_manager.getFunctions(True)
-    
+
     # Group functions by class
     class_functions = defaultdict(list)
     standalone_functions = []
-    
+
     print("Analyzing functions...")
     function_count = 0
     identified_count = 0
@@ -282,9 +393,15 @@ def main():
     rust_code.append("// Auto-generated Rust function definitions for Zoo Tycoon")
     rust_code.append("// Generated from Ghidra analysis")
     rust_code.append("")
+    rust_code.append("#![allow(clippy::type_complexity)]")
+    rust_code.append("")
     rust_code.append("use std::marker::PhantomData;")
+    rust_code.append("use core::ffi::c_void;")
     rust_code.append("")
     rust_code.append("use crate::FunctionDef;")
+    rust_code.append("")
+    rust_code.append("#[cfg(feature = \"detour-validation\")]")
+    rust_code.append("use openzt_detour_macro::validate_detour;")
     rust_code.append("")
     
     # Generate class-organized functions
@@ -335,18 +452,20 @@ def main():
                 full_const_name = base_const_name
             
             try:
-                fn_signature = get_function_signature_rust(function)
+                fn_signature = get_function_signature_rust(function, class_name, mutability_map)
                 address = function.getEntryPoint().getOffset()
-                
+
+                rust_code.append("    #[cfg_attr(feature = \"detour-validation\", validate_detour(\"{}/{}\"))]"
+                    .format(sanitized_module_name, full_const_name.lower()))
                 rust_code.append("    pub const {}: FunctionDef<{}> = FunctionDef{{address: {:#010x}, function_type: PhantomData}};".format(
                     full_const_name, fn_signature, address))
             except Exception as e:
                 print("Warning: Could not process function {}: {}".format(fn_name, str(e)))
                 continue
-        
+
         rust_code.append("}")
         rust_code.append("")
-    
+
     # Generate standalone functions
     if standalone_functions:
         rust_code.append("// Standalone functions")
@@ -375,18 +494,20 @@ def main():
         for function in sorted_functions:
             fn_name = function.getName()
             base_const_name = sanitize_rust_name(fn_name)
-            
+
             # Add number suffix if there are duplicates
             if name_counts[base_const_name] > 1:
                 full_const_name = "{}_{}".format(base_const_name, name_indices[base_const_name])
                 name_indices[base_const_name] += 1
             else:
                 full_const_name = base_const_name
-            
+
             try:
-                fn_signature = get_function_signature_rust(function)
+                fn_signature = get_function_signature_rust(function, None, mutability_map)
                 address = function.getEntryPoint().getOffset()
-                
+
+                rust_code.append("    #[cfg_attr(feature = \"detour-validation\", validate_detour(\"standalone/{}\"))]"
+                    .format(full_const_name.lower()))
                 rust_code.append("    pub const {}: FunctionDef<{}> = FunctionDef{{address: {:#010x}, function_type: PhantomData}};".format(
                     full_const_name, fn_signature, address))
             except Exception as e:
