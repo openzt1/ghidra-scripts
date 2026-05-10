@@ -1,8 +1,9 @@
 # Exports identified functions as Rust function definitions organized by class
-# @category Bryce
+# @category Rust
 # @runtime Jython
 
 import re
+import os
 from collections import defaultdict
 
 try:
@@ -12,6 +13,20 @@ except ImportError:
 
 if TYPE_CHECKING:
     from ghidra.ghidra_builtins import *
+
+
+# Custom type mappings - Add your game-specific type mappings here
+# Format: "GhidraTypeName": "RustTypeName"
+# Example: "BFPos": "IVec3"
+# Note: Pointer handling is automatic - if you map "BFPos" to "IVec3",
+#       then "BFPos*" will automatically map to "*mut IVec3" or "*const IVec3"
+CUSTOM_TYPE_MAP = {
+    # Add your custom mappings below:
+    # "BFPos": "IVec3",
+    # "BFVec3": "Vec3",
+    # "BfResourceMgr": "ResourceMgr",
+    # "std::string": "String",
+}
 
 
 def is_identified(function_name):
@@ -173,31 +188,45 @@ def map_type_to_rust(ghidra_type, is_mutable=False, _debug_fn=None):
         mutability = "mut" if is_mutable else "const"
         # Try getDataType() for clean base type name, fall back to string stripping
         try:
-            base_type_str = ghidra_type.getDataType().getName().lower().replace(" ", "")
+            base_type_str = ghidra_type.getDataType().getName().replace(" ", "")
         except Exception:
-            base_type_str = type_display.lower().replace("*", "").replace(" ", "")
+            base_type_str = type_display.replace("*", "").replace(" ", "")
 
-        if base_type_str.replace("*", "").endswith("void"):
+        # Handle void and LPVOID (Windows typedef for void *)
+        base_type_clean = base_type_str.replace("*", "").strip()
+        if base_type_clean == "void" or base_type_clean.upper() == "LPVOID":
             return "*{} c_void".format(mutability)
 
+        # Check custom type mapping for base type first
+        base_type_clean = base_type_str.replace("*", "")
+        if base_type_clean in CUSTOM_TYPE_MAP:
+            custom_rust_type = CUSTOM_TYPE_MAP[base_type_clean]
+            return "*{} {}".format(mutability, custom_rust_type)
+
         # Exact match first, then substring (list order ensures specificity)
+        base_type_str_lower = base_type_str.lower()
         for ghidra_key, rust in type_map:
-            if base_type_str == ghidra_key:
+            if base_type_str_lower == ghidra_key:
                 return "*{} {}".format(mutability, rust)
         for ghidra_key, rust in type_map:
-            if ghidra_key in base_type_str:
+            if ghidra_key in base_type_str_lower:
                 return "*{} {}".format(mutability, rust)
 
         return "*{} u32".format(mutability)
 
-    type_str = ghidra_type.getName().lower()
+    # Check custom type mapping first
+    type_str = ghidra_type.getName()
+    if type_str in CUSTOM_TYPE_MAP:
+        return CUSTOM_TYPE_MAP[type_str]
+
+    type_str_lower = type_str.lower()
 
     # Exact match first, then substring
     for ghidra_key, rust in type_map:
-        if type_str == ghidra_key:
+        if type_str_lower == ghidra_key:
             return rust
     for ghidra_key, rust in type_map:
-        if ghidra_key in type_str:
+        if ghidra_key in type_str_lower:
             return rust
 
     return "u32"
@@ -522,7 +551,7 @@ def main():
     if "/" in output_file:
         output_file = output_file.split("/")[-1]
     
-    print("\nWriting to {}...".format(output_file))
+    print("\nWriting to {} at {}".format(output_file, os.getcwd()))
     
     with open(output_file, 'w') as f:
         f.write("\n".join(rust_code))
