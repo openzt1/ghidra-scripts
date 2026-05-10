@@ -61,7 +61,7 @@ def get_functions():
     i_bound = 99
 
     out_file = open("/Users/finnhartshorn/ghidra_scripts/pure_functions.txt", "w")
-    out_file.write("Class, Name,Address,Size,Identified,Calling,Called,Pureish,CallersIdentified\n")
+    out_file.write("Class, Name,Address,Size,Identified,Calling,Called,CalledAddresses,Pureish,CallersIdentified\n")
     function_out_dir = "/Users/finnhartshorn/Projects/zootycoon/ai-decompile/functions/"
 
     for function in functions:
@@ -131,7 +131,7 @@ def get_functions():
         if len(called) == 0 and len(called_by) == 0:
             uncalled_pure_functions += 1
 
-        out_file.write("\"%s\",\"%s\",0x%s,%d,%r,%d,%d,%r,%r\n" % (function_class_name, function.getName(), function.getEntryPoint().toString(), function.getBody().getNumAddresses(), identified, len(function.getCallingFunctions(None)), len(function.getCalledFunctions(None)), more_likely_pure, callers_identified))
+        out_file.write("\"%s\",\"%s\",0x%s,%d,%r,%d,%d,\"%s\",%r,%r\n" % (function_class_name, function.getName(), function.getEntryPoint().toString(), function.getBody().getNumAddresses(), identified, len(function.getCallingFunctions(None)), len(function.getCalledFunctions(None)), get_called_addresses(called), more_likely_pure, callers_identified))
 
 
     print("Found %d total functions" % total_functions)
@@ -154,6 +154,11 @@ def get_func_sigs(functions):
     for f in functions:
         sigs.append(f.getPrototypeString(False, True))
     return sigs
+
+def get_called_addresses(functions):
+    if not functions:
+        return ""
+    return ",".join(["0x" + f.getEntryPoint().toString() for f in functions if not f.getEntryPoint().toString().startswith("EXTERNAL:")])
 
 def excluded_function(function):
     return str(function.body.minAddress) in ["005349b0"]
