@@ -45,19 +45,31 @@ import docking.widgets.OkDialog;
 public class ClassChooser extends GhidraScript {
 	TableChooserDialog tableDialog;
 
+	// Tracks whether we're in "rename class" or "attach to class" mode
+	private boolean attachMode = false;
+	private Function currentFunction = null;
+
 	@Override
 	public void run() throws Exception {
-		Function currentFunction = getFunctionContaining(currentAddress);
+		currentFunction = getFunctionContaining(currentAddress);
 		Symbol currentFunctionSymbol = currentFunction.getSymbol();
 		Symbol parentSymbol = currentFunctionSymbol.getParentSymbol();
+
 		if (parentSymbol.getSymbolType() != SymbolType.CLASS) {
-			OkDialog.showError("Error", "Function " + currentFunction.getName() + " is not a method of a class.");
-			return;
+			// No parent class — switch to attach mode
+			attachMode = true;
 		}
 
-		TableChooserExecutor executor = createTableExecutor(parentSymbol);
+		String dialogTitle = attachMode
+			? "Attach " + currentFunction.getName() + " to Class"
+			: "Rename " + parentSymbol.getName();
 
-		tableDialog = createTableChooserDialog("Rename " + parentSymbol.getName(), executor);
+		// In rename mode the executor needs the parent class symbol
+		TableChooserExecutor executor = attachMode
+			? createAttachExecutor()
+			: createRenameExecutor(parentSymbol);
+
+		tableDialog = createTableChooserDialog(dialogTitle, executor);
 		configureTableColumns(tableDialog);
 		tableDialog.show();
 		tableDialog.setMessage("Parsing...");
@@ -69,6 +81,10 @@ public class ClassChooser extends GhidraScript {
 		Map<String, ClassStatus> classStatuses = ida_export.getClassStatuses();
 
 		for (Map.Entry<String, ClassStatus> entry : classStatuses.entrySet()) {
+			// In attach mode, only show classes that actually exist in the program
+			if (attachMode && entry.getValue() != ClassStatus.IMPORTED) {
+				continue;
+			}
 			addClass(tableDialog, "0x0", entry.getKey(), entry.getValue());
 		}
 	}
@@ -113,8 +129,9 @@ public class ClassChooser extends GhidraScript {
 		tableChooserDialog.addCustomColumn(classStatusColumn);
 	}
 
+	// Original executor: renames the existing parent class
 	@SuppressWarnings("unused")
-	private TableChooserExecutor createTableExecutor(Symbol classSymbol) {
+	private TableChooserExecutor createRenameExecutor(Symbol classSymbol) {
 
 		TableChooserExecutor executor = new TableChooserExecutor() {
 
@@ -139,6 +156,60 @@ public class ClassChooser extends GhidraScript {
 			}
 		};
 		return executor;
+	}
+
+	// New executor: moves the current function into the selected class namespace
+	@SuppressWarnings("unused")
+	private TableChooserExecutor createAttachExecutor() {
+
+		TableChooserExecutor executor = new TableChooserExecutor() {
+
+			@Override
+			public String getButtonName() {
+				return "Attach to Class";
+			}
+
+			@Override
+			public boolean execute(AddressableRowObject rowObject) {
+				ClassForImport selectedClass = (ClassForImport) rowObject;
+				String className = selectedClass.getClassName();
+
+				println("Attaching " + currentFunction.getName() + " to class " + className);
+				attachFunctionToClass(currentFunction, className);
+
+				return false;
+			}
+		};
+		return executor;
+	}
+
+	// Moves a function into the namespace of an existing class
+	private void attachFunctionToClass(Function function, String className) {
+		Namespace ooNamespace = getNamespace(null, "OOAnalyzer");
+		List<Symbol> classSymbols = getSymbols(className, ooNamespace);
+
+		if (classSymbols.isEmpty()) {
+			OkDialog.showError("Error", "Class " + className + " not found in OOAnalyzer namespace");
+			return;
+		}
+		if (classSymbols.size() > 1) {
+			OkDialog.showError("Error", "Multiple symbols found for class " + className);
+			return;
+		}
+
+		Symbol classSymbol = classSymbols.get(0);
+		Namespace classNamespace = (Namespace) classSymbol.getObject();
+
+		start();
+		try {
+			function.getSymbol().setNamespace(classNamespace);
+			println("Attached " + function.getName() + " to " + className);
+		} catch (Exception e) {
+			e.printStackTrace();
+			end(false);
+			return;
+		}
+		end(true);
 	}
 
 	private void addClass(TableChooserDialog tableChooserDialog, String address, String className, ClassStatus status) {
@@ -216,7 +287,6 @@ public class ClassChooser extends GhidraScript {
 					FileWriter methodLogFileWriter = new FileWriter(methodLogFile);
 					while (scanner.hasNextLine()) {
 						String line = scanner.nextLine();
-						// println(line);
 						String[] parts = line.split(";");
 
 						if (parts.length >= 3) {
@@ -231,7 +301,6 @@ public class ClassChooser extends GhidraScript {
 							String className = extractClassName(methodSignature);
 							methodLogFileWriter.write(mangledName + " " + className + " " + methodName + " " + methodSignature + " " + address + "\n");
 
-							// uniqueClasses.add(className);
 							if (getDataTypes(className).length != 0) {
 								classStatuses.put(className, ClassStatus.IMPORTED);
 							} else {
@@ -241,7 +310,6 @@ public class ClassChooser extends GhidraScript {
 									classStatuses.put(className, ClassStatus.ABSENT);
 								}
 							}
-							// classStatuses.put(className, ClassStatus.ABSENT);
 							methodSignatures.put(mangledName, methodSignature);
 							methodAddresses.put(mangledName, address);
 						} else {
